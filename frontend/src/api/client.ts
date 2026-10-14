@@ -1,10 +1,49 @@
 import axios from "axios";
 
+const TOKEN_KEY = "pl_api_token";
+
+/** 获取 API 访问令牌：优先 localStorage（运行时输入），其次构建时环境变量。 */
+export function getApiToken(): string {
+  return (
+    localStorage.getItem(TOKEN_KEY) ||
+    (import.meta.env.VITE_API_TOKEN as string | undefined) ||
+    ""
+  );
+}
+
+export function setApiToken(token: string): void {
+  if (token) {
+    localStorage.setItem(TOKEN_KEY, token);
+  } else {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+}
+
 const client = axios.create({ baseURL: "/api", timeout: 60000 });
+
+// 请求拦截：携带 API 令牌（生产模式后端默认拒绝未授权请求）
+client.interceptors.request.use((config) => {
+  const token = getApiToken();
+  if (token) {
+    config.headers["X-API-Token"] = token;
+  }
+  return config;
+});
 
 client.interceptors.response.use(
   (r) => r,
   (err) => {
+    // 401：提示输入访问令牌并存入 localStorage，刷新后生效
+    if (err?.response?.status === 401 && !getApiToken()) {
+      const token = window.prompt(
+        "后端要求访问令牌（PL_API_TOKEN）。请输入令牌（将保存在本浏览器 localStorage）：",
+      );
+      if (token && token.trim()) {
+        setApiToken(token.trim());
+        window.location.reload();
+        return new Promise(() => {}); // 等待刷新，不再继续本次请求
+      }
+    }
     const msg = err?.response?.data?.detail || err?.message || "请求失败";
     return Promise.reject(new Error(typeof msg === "string" ? msg : JSON.stringify(msg)));
   }

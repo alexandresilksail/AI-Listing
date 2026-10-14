@@ -30,7 +30,8 @@ interface CostLog {
   purpose: string;
   status: string;
   latency_ms: number;
-  cost_usd: number;
+  cost_usd: number | null;
+  cost_known: boolean;
   error: string;
   created_at: string;
 }
@@ -323,7 +324,7 @@ const ModelSettings: React.FC = () => {
                 <Badge tone={LOG_STATUS_TONE[l.status] || "low"}>{LOG_STATUS_TEXT[l.status] || l.status}</Badge>
               </td>
               <td className="td text-xs">{l.latency_ms ? `${l.latency_ms} ms` : "—"}</td>
-              <td className="td text-xs">${(l.cost_usd || 0).toFixed(4)}</td>
+              <td className="td text-xs">{l.cost_usd == null ? <span className="text-amber-600" title="模型不在价格表，费用未知">未知</span> : `$${l.cost_usd.toFixed(4)}`}</td>
               <td className="td max-w-[220px] text-xs text-red-600">{l.error || <span className="text-slate-400">—</span>}</td>
               <td className="td text-xs text-slate-500">{fmtTime(l.created_at)}</td>
             </tr>

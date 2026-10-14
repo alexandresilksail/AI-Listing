@@ -35,6 +35,7 @@ def overview(db: Session = Depends(get_db)):
         "listing_tasks": _status_counts(db, ListingTask),
         "image_tasks": _status_counts(db, ImageGenTask),
         "today_spend_usd": TaskQueue.today_spend_usd(),
+        "today_unknown_cost_calls": TaskQueue.today_unknown_cost_calls(),
     }
 
 

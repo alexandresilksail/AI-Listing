@@ -1,6 +1,8 @@
 """图片工作台：生成任务、版本管理、人工审核状态。"""
 from __future__ import annotations
 
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -17,6 +19,9 @@ router = APIRouter(prefix="/api/images", tags=["图片工作台"])
 _VALID_TYPES = {"main", "scene", "selling", "info", "brand", "localize"}
 _VALID_RATIOS = {"1:1", "3:4", "4:3", "9:16", "16:9"}
 
+# 提交锁：串行化“查重 + 落库”，消除并发重复提交竞态（防重复扣费）
+_submit_lock = threading.Lock()
+
 
 @router.post("/tasks", response_model=ImageTaskOut)
 def create_task(payload: ImageTaskCreate, db: Session = Depends(get_db)):
@@ -29,28 +34,29 @@ def create_task(payload: ImageTaskCreate, db: Session = Depends(get_db)):
     if payload.aspect_ratio not in _VALID_RATIOS:
         raise HTTPException(400, f"不支持的画幅比例 {payload.aspect_ratio}")
 
-    # 去重：同商品+类型+市场+比例+提示词 已有进行中任务则不重复提交
-    existing = db.query(ImageGenTask).filter(
-        ImageGenTask.product_id == payload.product_id,
-        ImageGenTask.image_type == payload.image_type,
-        ImageGenTask.market == payload.market,
-        ImageGenTask.aspect_ratio == payload.aspect_ratio,
-        ImageGenTask.status.in_(["pending", "processing"])).first()
-    if existing:
-        return image_task_out(existing)
+    with _submit_lock:
+        # 去重：同商品+类型+市场+比例+提示词 已有进行中任务则不重复提交
+        existing = db.query(ImageGenTask).filter(
+            ImageGenTask.product_id == payload.product_id,
+            ImageGenTask.image_type == payload.image_type,
+            ImageGenTask.market == payload.market,
+            ImageGenTask.aspect_ratio == payload.aspect_ratio,
+            ImageGenTask.status.in_(["pending", "processing"])).first()
+        if existing:
+            return image_task_out(existing)
 
-    task = ImageGenTask(
-        product_id=payload.product_id, image_type=payload.image_type,
-        platform=payload.platform, market=payload.market,
-        language=MARKET_LANGUAGES[payload.market]["language"],
-        aspect_ratio=payload.aspect_ratio, count=payload.count,
-        style=payload.style, background=payload.background,
-        prompt=payload.prompt, ref_image_ids=payload.ref_image_ids,
-        status="pending")
-    db.add(task)
-    db.commit()
-    db.refresh(task)
-    get_queue().submit("image", task.id, payload.idempotency_key or f"image:{task.id}")
+        task = ImageGenTask(
+            product_id=payload.product_id, image_type=payload.image_type,
+            platform=payload.platform, market=payload.market,
+            language=MARKET_LANGUAGES[payload.market]["language"],
+            aspect_ratio=payload.aspect_ratio, count=payload.count,
+            style=payload.style, background=payload.background,
+            prompt=payload.prompt, ref_image_ids=payload.ref_image_ids,
+            status="pending")
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        get_queue().submit("image", task.id, payload.idempotency_key or f"image:{task.id}")
     return image_task_out(task)
 
 

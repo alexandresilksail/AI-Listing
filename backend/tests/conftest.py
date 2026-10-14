@@ -1,4 +1,4 @@
-"""测试固件：隔离临时数据库与存储目录。
+"""测试固件：隔离临时数据库与存储目录，统一 API 令牌鉴权。
 
 必须在导入任何 app 模块之前设置 PL_DATA_DIR / PL_DATABASE_URL，
 因为 config 模块在导入时就会计算这些路径常量。
@@ -18,17 +18,25 @@ _tmp_root = Path(tempfile.mkdtemp(prefix="polylisting_test_"))
 _data_dir = _tmp_root / "data"
 _data_dir.mkdir(parents=True, exist_ok=True)
 
+TEST_API_TOKEN = "test-secret-token-123456"
+
 os.environ["PL_DATA_DIR"] = str(_data_dir)
 os.environ["PL_DATABASE_URL"] = f"sqlite:///{(_data_dir / 'test.db').as_posix()}"
 os.environ["PL_TEXT_API_BASE"] = ""
 os.environ["PL_TEXT_API_KEY"] = ""
 os.environ["PL_IMAGE_API_BASE"] = ""
 os.environ["PL_IMAGE_API_KEY"] = ""
+# 测试环境配置 API 令牌：验证全局鉴权生效（未授权请求必须被拒绝）
+os.environ["PL_API_TOKEN"] = TEST_API_TOKEN
+# 测试环境为 development（不触发生产 fail-fast）
+os.environ["PL_ENV"] = "development"
 
 import pytest  # noqa: E402
 
 from app.database import init_db  # noqa: E402
 from app.main import app  # noqa: E402
+
+TOKEN_HEADERS = {"X-API-Token": TEST_API_TOKEN}
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -39,6 +47,16 @@ def _init_db():
 
 @pytest.fixture(scope="session")
 def client():
+    """带令牌的测试客户端（模拟已授权前端）。"""
+    from fastapi.testclient import TestClient
+
+    with TestClient(app, headers=TOKEN_HEADERS) as c:
+        yield c
+
+
+@pytest.fixture(scope="session")
+def anon_client():
+    """不带令牌的测试客户端（用于验证未授权请求被拒绝）。"""
     from fastapi.testclient import TestClient
 
     with TestClient(app) as c:

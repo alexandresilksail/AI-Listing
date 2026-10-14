@@ -49,6 +49,7 @@ def update_model_settings(payload: ModelSettingsIn):
 @router.post("/test")
 def test_connection(kind: str = "text"):
     """测试模型 API 连通性（不会在响应中返回密钥）。"""
+    from ..security import scrub_secrets
     s = effective_settings()
     if kind == "text":
         base, key, model = s.text_api_base, s.text_api_key, s.text_model
@@ -69,12 +70,14 @@ def test_connection(kind: str = "text"):
                 resp = client.get(f"{base.rstrip('/')}/models",
                                   headers={"Authorization": f"Bearer {key}"})
         ok = resp.status_code < 400
+        detail = resp.text[:200] if not ok else ""
         return {"ok": ok, "status_code": resp.status_code,
                 "latency_ms": int((time.monotonic() - started) * 1000),
-                "message": "连接成功" if ok else f"API 返回 {resp.status_code}：{resp.text[:200]}"}
+                "message": ("连接成功" if ok else
+                            f"API 返回 {resp.status_code}：{scrub_secrets(detail, key)}")}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "latency_ms": int((time.monotonic() - started) * 1000),
-                "message": f"连接失败：{e}"}
+                "message": f"连接失败：{scrub_secrets(str(e), key)}"}
 
 
 @router.get("/cost-logs")
@@ -82,4 +85,5 @@ def cost_logs(limit: int = 50, db: Session = Depends(get_db)):
     rows = db.query(ApiCallLog).order_by(ApiCallLog.created_at.desc()).limit(limit).all()
     return [{"id": r.id, "provider": r.provider, "model": r.model, "purpose": r.purpose,
              "status": r.status, "latency_ms": r.latency_ms, "cost_usd": r.cost_usd,
+             "cost_known": r.cost_usd is not None,
              "error": r.error, "created_at": r.created_at.isoformat()} for r in rows]

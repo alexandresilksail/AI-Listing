@@ -11,6 +11,9 @@
 cd backend && uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
+### 后端启动即退出：「PL_ENV=production 但未配置 PL_API_TOKEN」
+**这是有意的安全设计（fail-fast）**：生产模式默认拒绝所有未授权请求，没有令牌就拒绝启动，绝不带病上线。解决：在 `.env` 设置 `PL_API_TOKEN=<长随机串>`，或本地开发把 `PL_ENV` 改为 `development`。
+
 ### 端口被占用
 ```bash
 # Linux/Mac
@@ -26,6 +29,12 @@ taskkill /PID <PID> /F
 2. 确认 Vite 代理生效（`vite.config.ts` 中 `/api` → `http://127.0.0.1:8000`），若后端换了端口需同步修改 `target`
 3. F12 Console 查看具体报错
 
+### 所有接口 401 Unauthorized（V1.1）
+后端配置了 `PL_API_TOKEN`。请求需带头 `X-API-Token: <令牌>` 或 `Authorization: Bearer <令牌>`。前端会在 401 时弹框引导输入；令牌存在 localStorage（键 `pl_api_token`），清除它即可重新输入。
+
+### 从 V1.0 升级后任务提交 500：`NOT NULL constraint failed: listing_tasks.cost_usd`
+V1.1 将费用字段改为可空，「未知费用」不再按 0 计。旧库表结构不会自动变更。解决：停止服务 → 删除 `backend/data/polylisting.db` → 重启（会按新结构重建）；生产库请写 Alembic 迁移 `ALTER COLUMN cost_usd DROP NOT NULL`。详见 Linux 部署指南「V1.0 → V1.1 升级特别说明」。
+
 ## 二、生成类
 
 ### 生成的 Listing 全是「[模拟·待补充]」
@@ -36,6 +45,12 @@ taskkill /PID <PID> /F
 
 ### 任务一直停留在「待处理」
 `get_queue()` 的 worker 应在 lifespan 启动时运行。检查后端日志是否有 `PolyListing AI 后端已启动，任务队列运行中`。若无，重启服务；若任务显示「失败」，查看任务行的错误信息。
+
+### 重启服务后任务消失了 / 卡在「处理中」（V1.1 已修复）
+V1.1 起启动时会自动对账：pending 任务重新入队，processing 中任务标记为失败（可重试）。如仍有异常，查看日志中 `polylisting.queue` 的输出。
+
+### 费用显示「未知」而不是金额（V1.1 正常行为）
+所用模型不在内置价格表内。系统**不会把未知费用当 0**——否则会掩盖真实成本。处理方式见 [`API配置指南.md`](API配置指南.md)「未知模型价格管控」。
 
 ### 任务失败常见原因
 | 错误信息 | 原因与处理 |
@@ -109,4 +124,4 @@ cd backend
 pytest tests -v
 ```
 
-参考最近一次基线结果：[`测试报告.md`](测试报告.md)（36 项全部通过）。
+参考最近一次基线结果：[`测试报告.md`](测试报告.md)（120 项全部通过）。

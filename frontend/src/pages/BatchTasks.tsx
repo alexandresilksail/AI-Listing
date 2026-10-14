@@ -25,6 +25,7 @@ interface Overview {
   listing_tasks: TaskOverview;
   image_tasks: TaskOverview;
   today_spend_usd: number;
+  today_unknown_cost_calls: number;
 }
 
 const EMPTY_STATUS: TaskOverview = { pending: 0, processing: 0, completed: 0, partial: 0, failed: 0 };
@@ -141,7 +142,7 @@ const BatchTasks: React.FC = () => {
         title="任务状态总览"
         extra={
           <div className="text-right">
-            <div className="text-[11px] text-slate-400">今日花费</div>
+            <div className="text-[11px] text-slate-400">今日花费（仅已知费用）</div>
             <div className="text-sm font-bold text-slate-900">
               ${(overview?.today_spend_usd ?? 0).toFixed(4)}
             </div>
@@ -152,6 +153,12 @@ const BatchTasks: React.FC = () => {
           <StatusRow label="Listing 生成任务" data={lt} />
           <StatusRow label="图片生成任务" data={it} />
         </div>
+        {(overview?.today_unknown_cost_calls ?? 0) > 0 && (
+          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            ⚠️ 今日有 {overview?.today_unknown_cost_calls} 次调用费用未知（模型不在内置价格表），
+            未计入上方花费统计。预算控制对未知费用模型不生效，请谨慎使用。
+          </div>
+        )}
       </Card>
 
       <Card title="任务列表" className="mt-5">
@@ -216,7 +223,7 @@ const BatchTasks: React.FC = () => {
                 <td className="td"><SimBadge simulated={t.is_simulated} /></td>
                 <td className="td text-xs text-slate-500">{t.model_name || "—"}</td>
                 <td className="td text-xs">{fmtDuration(t.duration_ms)}</td>
-                <td className="td text-xs">${(t.cost_usd || 0).toFixed(4)}</td>
+                <td className="td text-xs">{t.cost_usd == null ? <span className="text-amber-600" title="模型不在价格表，费用未知">未知</span> : `$${t.cost_usd.toFixed(4)}`}</td>
                 <td className="td max-w-[220px] text-xs text-red-600">{t.error || <span className="text-slate-400">—</span>}</td>
                 <td className="td">
                   <button
@@ -243,7 +250,7 @@ const BatchTasks: React.FC = () => {
                 <td className="td"><SimBadge simulated={t.is_simulated} /></td>
                 <td className="td text-xs text-slate-500">{t.model_name || "—"}</td>
                 <td className="td text-xs">{fmtDuration(t.duration_ms)}</td>
-                <td className="td text-xs">${(t.cost_usd || 0).toFixed(4)}</td>
+                <td className="td text-xs">{t.cost_usd == null ? <span className="text-amber-600" title="模型不在价格表，费用未知">未知</span> : `$${t.cost_usd.toFixed(4)}`}</td>
                 <td className="td max-w-[220px] text-xs text-red-600">{t.error || <span className="text-slate-400">—</span>}</td>
                 <td className="td">
                   <button

@@ -11,6 +11,7 @@ import time
 
 from PIL import Image, ImageDraw, ImageFont
 
+from ..config import effective_settings
 from ..models import ApiCallLog, GeneratedImage, ImageGenTask, Product, ProductImage
 from .ai.registry import get_image_adapter, image_available
 from .market_data import IMAGE_TYPE_LABELS
@@ -113,7 +114,7 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
     storage = get_storage()
     is_simulated = False
     model_name = ""
-    cost = 0.0
+    cost: float | None = None
     produced: list[bytes] = []
 
     try:
@@ -121,6 +122,14 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
             adapter = get_image_adapter()
             model_name = adapter.model
             size = adapter.size_for(task.aspect_ratio)
+            # 执行前预算检查（图片费用可按张数预估；未知模型价格时按策略处理）
+            from .task_queue import TaskQueue
+            est = adapter.estimate_cost(task.count)  # None = 费用未知
+            ok, msg = TaskQueue.check_budget(est, effective_settings().per_task_budget_usd)
+            if not ok:
+                raise RuntimeError(f"预算检查未通过：{msg}")
+            if msg:
+                logger.warning("任务 %s 预算提示：%s", task.id, msg)
             if refs:
                 # 使用商品原图作为参考进行编辑/生成
                 result = adapter.edit(prompt=prompt, image_bytes=storage.read(refs[0].path),
@@ -128,7 +137,7 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
             else:
                 result = adapter.generate(prompt=prompt, size=size, n=task.count)
             produced = result.images
-            cost = result.cost_usd
+            cost = result.cost_usd  # None = 费用未知
             db.add(ApiCallLog(provider=adapter.name, model=model_name, purpose="image",
                               status="success", latency_ms=int((time.monotonic() - started) * 1000),
                               cost_usd=cost))
@@ -150,15 +159,17 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
         return task
 
     # 已成功生成的部分保留（任务失败不清空已产出）
+    from ..security import verify_image_bytes
     existing = db.query(GeneratedImage).filter(GeneratedImage.task_id == task.id).count()
     saved = 0
+    invalid = 0
     for i, content in enumerate(produced):
         try:
-            with Image.open(io.BytesIO(content)) as im:
-                w, hgt = im.size
-                im.load()
-        except Exception:  # noqa: BLE001
-            w, hgt = 0, 0
+            w, hgt = verify_image_bytes(content)
+        except ValueError:
+            invalid += 1
+            logger.warning("任务 %s 第 %d 张生成结果不是有效图片，已丢弃", task.id, i + 1)
+            continue
         subdir = f"products/{product.id}/generated"
         filename = new_filename(f"{product.sku}_{task.image_type}_{task.market}", "png")
         rel = storage.save_image(content, filename, subdir)
@@ -172,10 +183,12 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
     task.status = "completed" if saved == task.count else "partial"
     task.is_simulated = is_simulated
     task.model_name = model_name or ("simulated" if is_simulated else "")
-    task.cost_usd = cost
+    task.cost_usd = cost  # None = 费用未知
     task.duration_ms = int((time.monotonic() - started) * 1000)
     if saved < task.count:
         task.error = f"成功 {saved}/{task.count} 张，其余失败"
+        if invalid:
+            task.error += f"（其中 {invalid} 张不是有效图片已丢弃）"
     db.commit()
 
     # 生成后自动执行图片审核

@@ -17,9 +17,6 @@ EXPORTS_DIR = DATA_DIR / "exports"
 UPLOADS_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "polylisting.db"
 
-# 演示数据目录（随代码分发）
-DEMO_DIR = BASE_DIR.parent / "demo"
-
 MARKET_LANGUAGES = {
     "US": {"language": "en-US", "label": "美国 · 美式英语", "rtl": False},
     "UK": {"language": "en-GB", "label": "英国 · 英式英语", "rtl": False},
@@ -44,14 +41,25 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
+    # 运行环境：development（本地开发，可无令牌）/ production（生产，必须配置 API 令牌）
+    env: str = Field(default="development", description="development 或 production")
+
     # 数据库（默认 SQLite，生产可切换 PostgreSQL）
     database_url: str = f"sqlite:///{DB_PATH.as_posix()}"
 
-    # 安全
-    api_token: str = Field(default="", description="可选：前端访问后端所需令牌，留空则本机开发不校验")
+    # 安全：API 访问令牌。production 环境下必须设置，否则应用拒绝启动（fail-fast）。
+    # 所有 /api/* 管理接口（除 /api/health、/api/meta）都要求
+    # Authorization: Bearer <token> 或 X-API-Token: <token>。
+    api_token: str = Field(default="", description="API 访问令牌；生产环境必须设置")
+    # 下载模型返回图片 URL 的大小上限（MB）
+    max_download_mb: int = 20
+    # 仅开发调试用：允许 http 与非公网地址的图片下载（SSRF 风险，生产禁止）
+    allow_insecure_download: bool = False
     max_upload_mb: int = 10
     max_images_per_task: int = 8
     allowed_image_ext: tuple[str, ...] = ("jpg", "jpeg", "png", "webp")
+    # 上传图片像素上限（防解压炸弹）
+    max_image_pixels: int = 50_000_000
 
     # AI 适配器（OpenAI 兼容接口；留空表示未配置，生成结果将标记为“模拟”）
     text_api_base: str = Field(default="", description="文本模型 API Base，如 https://api.openai.com/v1")
@@ -62,11 +70,18 @@ class Settings(BaseSettings):
     image_model: str = Field(default="gpt-image-1", description="图像模型名称")
     request_timeout_sec: int = 120
     max_retries: int = 2
+    # 文本模型 JSON 输出模式：json_object（默认，部分供应商不支持时自动降级为 none）
+    text_json_mode: str = Field(default="json_object", description="json_object 或 none")
+    # 未知模型价格策略：allow=允许执行但费用标记为未知；block=拒绝执行
+    unknown_cost_policy: str = Field(default="allow", description="allow 或 block")
 
     # 预算控制
     daily_budget_usd: float = 10.0
     per_task_budget_usd: float = 2.0
     max_skus_per_task: int = 50
+
+    # 单个任务执行超时（秒）
+    task_timeout_sec: int = 600
 
     # CORS（前端开发服务器）
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -76,12 +91,23 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
+    def is_production(self) -> bool:
+        return self.env.strip().lower() == "production"
+
+    @property
     def text_configured(self) -> bool:
         return bool(self.text_api_base and self.text_api_key)
 
     @property
     def image_configured(self) -> bool:
         return bool(self.image_api_base and self.image_api_key)
+
+    def validate_production(self) -> None:
+        """生产环境启动前检查：未配置 API 令牌直接拒绝启动（fail-fast）。"""
+        if self.is_production and not self.api_token:
+            raise RuntimeError(
+                "PL_ENV=production 但未配置 PL_API_TOKEN：生产模式默认拒绝所有未授权请求，"
+                "已拒绝启动。请设置 PL_API_TOKEN，或明确使用 PL_ENV=development 运行。")
 
 
 @lru_cache

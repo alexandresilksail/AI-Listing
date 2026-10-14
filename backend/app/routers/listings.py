@@ -1,6 +1,8 @@
 """Listing 生成：任务提交、版本管理、编辑、单字段重生成。"""
 from __future__ import annotations
 
+import threading
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -15,6 +17,9 @@ from ..services.task_queue import TaskQueue, get_queue
 
 router = APIRouter(prefix="/api/listings", tags=["Listing 生成"])
 
+# 提交锁：串行化“查重 + 落库”，消除并发重复提交竞态（防重复扣费）
+_submit_lock = threading.Lock()
+
 
 @router.post("/tasks", response_model=list[ListingTaskOut])
 def create_tasks(payload: ListingTaskCreate, db: Session = Depends(get_db)):
@@ -27,26 +32,27 @@ def create_tasks(payload: ListingTaskCreate, db: Session = Depends(get_db)):
             raise HTTPException(400, f"不支持的市场代码 {m}")
     queue = get_queue()
     out = []
-    for market in payload.markets:
-        lang = MARKET_LANGUAGES[market]["language"]
-        # 去重：同商品+平台+市场已有进行中任务则不重复提交
-        existing = db.query(ListingTask).filter(
-            ListingTask.product_id == payload.product_id,
-            ListingTask.platform == payload.platform,
-            ListingTask.market == market,
-            ListingTask.status.in_(["pending", "processing"])).first()
-        if existing:
-            out.append(_task_out(existing))
-            continue
-        task = ListingTask(product_id=payload.product_id, platform=payload.platform,
-                           market=market, language=lang, status="pending",
-                           idempotency_key=payload.idempotency_key or "")
-        db.add(task)
-        db.commit()
-        db.refresh(task)
-        queue.submit("listing", task.id,
-                     payload.idempotency_key or f"listing:{task.id}")
-        out.append(_task_out(task))
+    with _submit_lock:
+        for market in payload.markets:
+            lang = MARKET_LANGUAGES[market]["language"]
+            # 去重：同商品+平台+市场已有进行中任务则不重复提交
+            existing = db.query(ListingTask).filter(
+                ListingTask.product_id == payload.product_id,
+                ListingTask.platform == payload.platform,
+                ListingTask.market == market,
+                ListingTask.status.in_(["pending", "processing"])).first()
+            if existing:
+                out.append(_task_out(existing))
+                continue
+            task = ListingTask(product_id=payload.product_id, platform=payload.platform,
+                               market=market, language=lang, status="pending",
+                               idempotency_key=payload.idempotency_key or "")
+            db.add(task)
+            db.commit()
+            db.refresh(task)
+            queue.submit("listing", task.id,
+                         payload.idempotency_key or f"listing:{task.id}")
+            out.append(_task_out(task))
     return out
 
 
@@ -103,6 +109,8 @@ def get_version(version_id: int, db: Session = Depends(get_db)):
 
 @router.post("/versions/{version_id}/edit", response_model=ListingVersionOut)
 def edit_version(version_id: int, payload: ListingEdit, db: Session = Depends(get_db)):
+    if not db.get(ListingVersion, version_id):
+        raise HTTPException(404, "版本不存在")
     try:
         v = edit_listing(db, version_id, [p.model_dump() for p in payload.fields], payload.note)
     except ValueError as e:
@@ -112,6 +120,8 @@ def edit_version(version_id: int, payload: ListingEdit, db: Session = Depends(ge
 
 @router.post("/versions/{version_id}/regenerate")
 def regen_field(version_id: int, field: str, db: Session = Depends(get_db)):
+    if not db.get(ListingVersion, version_id):
+        raise HTTPException(404, "版本不存在")
     try:
         return regenerate_field(db, version_id, field)
     except ValueError as e:

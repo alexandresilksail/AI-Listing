@@ -4,9 +4,10 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .auth import require_api_token, warn_if_insecure
 from .config import effective_settings
 from .database import init_db
 from .routers import (demo, exports, files, images, listings, products, reviews,
@@ -21,6 +22,10 @@ logger = logging.getLogger("polylisting")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    s = effective_settings()
+    # 生产模式启动前检查：未配置 API 令牌直接拒绝启动（fail-fast）
+    s.validate_production()
+    warn_if_insecure()
     init_db()
     # 初始化内置平台规则（幂等）
     from .database import get_sessionmaker
@@ -30,13 +35,16 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
     queue = get_queue()
+    # 启动对账：恢复遗留 pending 任务，processing 标记失败（不静默丢失）
+    queue.recover_on_startup()
     await queue.start()
-    logger.info("PolyListing AI 后端已启动，任务队列运行中")
+    logger.info("PolyListing AI 后端已启动（env=%s，任务队列运行中）", s.env)
     yield
     await queue.stop()
 
 
-app = FastAPI(title="PolyListing AI", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="PolyListing AI", version="1.1.0", lifespan=lifespan,
+              dependencies=[Depends(require_api_token)])
 
 s = effective_settings()
 app.add_middleware(
@@ -56,7 +64,8 @@ for r in (products.router, listings.router, seo.router, images.router,
 @app.get("/api/health")
 def health():
     s = effective_settings()
-    return {"status": "ok", "app": s.app_name,
+    # 探活端点：仅返回运行状态与“是否已配置模型”布尔探针（无任何密钥/配置细节）
+    return {"status": "ok", "app": s.app_name, "env": s.env,
             "text_configured": s.text_configured,
             "image_configured": s.image_configured}
 

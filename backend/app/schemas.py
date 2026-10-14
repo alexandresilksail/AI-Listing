@@ -145,7 +145,7 @@ class ListingTaskOut(BaseModel):
     is_simulated: bool
     model_name: str
     error: str
-    cost_usd: float
+    cost_usd: float | None = None  # None = 费用未知（模型不在价格表）
     duration_ms: int
     created_at: datetime
     updated_at: datetime
@@ -249,7 +249,7 @@ class ImageTaskOut(BaseModel):
     is_simulated: bool
     model_name: str
     error: str
-    cost_usd: float
+    cost_usd: float | None = None  # None = 费用未知（模型不在价格表）
     duration_ms: int
     created_at: datetime
     updated_at: datetime

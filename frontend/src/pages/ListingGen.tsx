@@ -310,7 +310,7 @@ const ListingGen: React.FC = () => {
                 </td>
                 <td className="td text-xs text-slate-500">{t.model_name || "—"}</td>
                 <td className="td">{t.duration_ms ?? 0}</td>
-                <td className="td">${(t.cost_usd ?? 0).toFixed(4)}</td>
+                <td className="td">{t.cost_usd == null ? <span className="text-amber-600" title="模型不在价格表，费用未知">未知</span> : `$${t.cost_usd.toFixed(4)}`}</td>
                 <td className="td max-w-[220px] text-xs text-red-600">{t.error || "—"}</td>
                 <td className="td">
                   <button

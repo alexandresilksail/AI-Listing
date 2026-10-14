@@ -90,7 +90,8 @@ class ListingTask(Base):
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)  # 未配置 API 时为模拟结果
     model_name: Mapped[str] = mapped_column(String(64), default="")
     error: Mapped[str] = mapped_column(Text, default="")
-    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # cost_usd: NULL 表示费用未知（模型不在价格表）；绝不允许把未知当 0
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     idempotency_key: Mapped[str] = mapped_column(String(128), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -188,7 +189,8 @@ class ImageGenTask(Base):
     is_simulated: Mapped[bool] = mapped_column(Boolean, default=False)
     model_name: Mapped[str] = mapped_column(String(64), default="")
     error: Mapped[str] = mapped_column(Text, default="")
-    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # cost_usd: NULL 表示费用未知（模型不在价格表）；绝不允许把未知当 0
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     idempotency_key: Mapped[str] = mapped_column(String(128), default="", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -266,7 +268,8 @@ class ApiCallLog(Base):
     purpose: Mapped[str] = mapped_column(String(64), default="")  # listing/seo/image/review
     status: Mapped[str] = mapped_column(String(16), default="success")  # success/failed/simulated
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
-    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    # cost_usd: NULL 表示费用未知（模型不在价格表）；仅费用已知的调用计入预算统计
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")  # 绝不记录密钥

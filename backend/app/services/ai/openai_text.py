@@ -2,14 +2,22 @@
 
 适用于任何提供 OpenAI 兼容 /chat/completions 接口的服务商，
 通过配置 text_api_base / text_api_key / text_model 接入。
+
+兼容性处理：
+- response_format=json_object 部分供应商不支持（返回 400）：
+  自动降级为不带 response_format 重试一次，保证可用性。
+- 所有错误信息经过密钥过滤，绝不泄露 API Key。
 """
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 
-from .base import TextAdapter, TextGenResult
+from .base import AINotConfigured, TextAdapter, TextGenResult
+
+logger = logging.getLogger("polylisting.ai.text")
 
 LISTING_SYSTEM_PROMPT = """你是资深跨境电商本地化文案专家，为亚马逊/Temu/独立站卖家撰写商品 Listing。
 硬性规则：
@@ -25,38 +33,61 @@ LISTING_SYSTEM_PROMPT = """你是资深跨境电商本地化文案专家，为�
 class OpenAITextAdapter(TextAdapter):
     name = "openai-compatible-text"
 
+    def __init__(self, *args, json_mode: str = "json_object", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.json_mode = json_mode if json_mode in ("json_object", "none") else "json_object"
+
+    def _post(self, client: httpx.Client, system: str, user: str,
+              use_json_mode: bool) -> httpx.Response:
+        body: dict = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.6,
+        }
+        if use_json_mode:
+            body["response_format"] = {"type": "json_object"}
+        return client.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=body,
+        )
+
     def _chat(self, system: str, user: str) -> tuple[str, int, int]:
-        """返回 (内容, tokens_in, tokens_out)。带超时与有限重试。"""
+        """返回 (内容, tokens_in, tokens_out)。带超时、有限重试与 JSON 模式降级。"""
+        from ...config import effective_settings
+        from ...security import scrub_secrets
+        s = effective_settings()
+        use_json_mode = s.text_json_mode == "json_object"
         last_err: Exception | None = None
+        degraded = False  # 已因供应商不支持 json_object 而降级
         for attempt in range(self.max_retries + 1):
             try:
                 with httpx.Client(timeout=self.timeout) as client:
-                    resp = client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {self.api_key}"},
-                        json={
-                            "model": self.model,
-                            "messages": [
-                                {"role": "system", "content": system},
-                                {"role": "user", "content": user},
-                            ],
-                            "temperature": 0.6,
-                            "response_format": {"type": "json_object"},
-                        },
-                    )
-                if resp.status_code == 429 or resp.status_code >= 500:
-                    raise httpx.HTTPStatusError("rate limited/server error",
-                                                request=resp.request, response=resp)
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage") or {}
-                return content, int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+                    resp = self._post(client, system, user, use_json_mode)
+                    # 供应商不支持 response_format：降级重试一次
+                    if (resp.status_code == 400 and use_json_mode and not degraded
+                            and "response_format" in resp.text[:500]):
+                        logger.warning("供应商不支持 response_format=json_object，降级重试")
+                        use_json_mode = False
+                        degraded = True
+                        resp = self._post(client, system, user, False)
+                    if resp.status_code == 429 or resp.status_code >= 500:
+                        raise httpx.HTTPStatusError("rate limited/server error",
+                                                    request=resp.request, response=resp)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage") or {}
+                    return (content, int(usage.get("prompt_tokens") or 0),
+                            int(usage.get("completion_tokens") or 0))
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 if attempt == self.max_retries:
                     break
-        raise RuntimeError(f"文本模型调用失败：{last_err}")
+        raise RuntimeError(f"文本模型调用失败：{scrub_secrets(str(last_err), s.text_api_key)}")
 
     @staticmethod
     def _extract_json(text: str) -> dict:
@@ -73,7 +104,6 @@ class OpenAITextAdapter(TextAdapter):
     def generate_listing(self, *, product: dict, platform: str, market: str,
                          language: str, rules: list[dict]) -> TextGenResult:
         if not self.available():
-            from .base import AINotConfigured
             raise AINotConfigured("文本模型 API 未配置")
         product_json = json.dumps(product, ensure_ascii=False, indent=1)
         rules_json = json.dumps(rules, ensure_ascii=False, indent=1)
@@ -109,13 +139,13 @@ class OpenAITextAdapter(TextAdapter):
         fields.setdefault("marketing_slogan", "")
         fields.setdefault("localization_note", "")
         fields.setdefault("risk_note", "")
+        cost = self.estimate_cost(tin, tout)
         return TextGenResult(fields=fields, model=self.model, tokens_in=tin,
-                             tokens_out=tout, cost_usd=self.estimate_cost(tin, tout),
+                             tokens_out=tout, cost_usd=cost, cost_known=cost is not None,
                              raw=content)
 
     def generate_seo(self, *, product: dict, market: str, language: str) -> TextGenResult:
         if not self.available():
-            from .base import AINotConfigured
             raise AINotConfigured("文本模型 API 未配置")
         product_json = json.dumps(product, ensure_ascii=False, indent=1)
         user_prompt = f"""目标市场：{market}（语言：{language}）
@@ -136,6 +166,7 @@ class OpenAITextAdapter(TextAdapter):
             "你是亚马逊 SEO 关键词研究员。只基于商品资料推导关键词，不虚构任何搜索量/竞争度数据。必须输出 JSON。",
             user_prompt)
         fields = self._extract_json(content)
+        cost = self.estimate_cost(tin, tout)
         return TextGenResult(fields=fields, model=self.model, tokens_in=tin,
-                             tokens_out=tout, cost_usd=self.estimate_cost(tin, tout),
+                             tokens_out=tout, cost_usd=cost, cost_known=cost is not None,
                              raw=content)

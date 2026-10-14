@@ -6,6 +6,7 @@ import time
 import logging
 from datetime import datetime
 
+from ..config import effective_settings
 from ..models import (ApiCallLog, ListingField, ListingTask, ListingVersion, Product,
                       ProductParam)
 from ..schemas import ProductParamIn
@@ -98,6 +99,21 @@ def active_rules(db, platform: str, market: str) -> list[dict]:
     return out
 
 
+def _estimate_text_cost(adapter, facts: dict, rules: list[dict]) -> float | None:
+    """文本任务执行前的保守费用预估（未知模型返回 None）。
+
+    输入 token 按 资料+规则 JSON 长度粗估（中英混合约 2 字符/token），
+    输出按 1500 token 预估；仅用于预算检查，实际费用以调用返回为准。
+    """
+    import json
+    if not adapter.price_known():
+        return None
+    chars = len(json.dumps(facts, ensure_ascii=False)) + len(json.dumps(rules, ensure_ascii=False)) + 800
+    est_in = max(500, chars // 2)
+    est_out = 1500
+    return adapter.estimate_cost(est_in, est_out)
+
+
 # ---------------------------------------------------------------- 模拟生成
 def _simulate_listing(product: Product, platform: str, market: str, language: str) -> dict:
     """未配置真实 API 时的演示文案：结构完整但为模板占位内容，全部标记 is_simulated。"""
@@ -170,21 +186,30 @@ def run_listing_task(db, task_id: int) -> ListingTask:
     rules = active_rules(db, task.platform, task.market)
     is_simulated = False
     model_name = ""
-    cost = 0.0
+    cost: float | None = None
     fields: dict = {}
 
     try:
         if text_available():
             adapter = get_text_adapter()
             model_name = adapter.model
+            # 执行前预算检查（预估算费用；未知模型价格时按策略处理）
+            from .task_queue import TaskQueue
+            est = _estimate_text_cost(adapter, facts, rules)
+            ok, msg = TaskQueue.check_budget(est, effective_settings().per_task_budget_usd)
+            if not ok:
+                raise RuntimeError(f"预算检查未通过：{msg}")
+            if msg:
+                logger.warning("任务 %s 预算提示：%s", task.id, msg)
             result = adapter.generate_listing(
                 product=facts, platform=task.platform, market=task.market,
                 language=task.language, rules=rules)
             fields = result.fields
-            cost = result.cost_usd
+            cost = result.cost_usd  # None = 费用未知
             db.add(ApiCallLog(provider=adapter.name, model=model_name, purpose="listing",
                               status="success", latency_ms=int((time.monotonic() - started) * 1000),
-                              cost_usd=cost, tokens_in=result.tokens_in, tokens_out=result.tokens_out))
+                              cost_usd=cost, tokens_in=result.tokens_in,
+                              tokens_out=result.tokens_out))
         else:
             is_simulated = True
             fields = _simulate_listing(product, task.platform, task.market, task.language)
@@ -299,6 +324,11 @@ def regenerate_field(db, version_id: int, field_name: str) -> dict:
     facts = product_facts(db, version.product_id)
     rules = active_rules(db, version.platform, version.market)
     adapter = get_text_adapter()
+    from .task_queue import TaskQueue
+    est = _estimate_text_cost(adapter, facts, rules)
+    ok, msg = TaskQueue.check_budget(est, effective_settings().per_task_budget_usd)
+    if not ok:
+        raise ValueError(f"预算检查未通过：{msg}")
     result = adapter.generate_listing(product=facts, platform=version.platform,
                                       market=version.market, language=version.language,
                                       rules=rules)

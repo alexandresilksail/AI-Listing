@@ -10,7 +10,8 @@ def get_text_adapter() -> TextAdapter:
     from ...config import effective_settings
     s = effective_settings()
     adapter = OpenAITextAdapter(s.text_api_base, s.text_api_key, s.text_model,
-                                timeout=s.request_timeout_sec, max_retries=s.max_retries)
+                                timeout=s.request_timeout_sec, max_retries=s.max_retries,
+                                json_mode=s.text_json_mode)
     if not adapter.available():
         raise AINotConfigured("文本模型 API 未配置：请在“模型设置”中填写 API Base 与 Key")
     return adapter

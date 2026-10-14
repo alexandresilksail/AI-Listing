@@ -5,7 +5,7 @@ import csv
 import io
 import json
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..models import (ExportTask, GeneratedImage, ListingVersion, Product, ReviewItem,
@@ -91,7 +91,7 @@ def export_listing(db, export_id: int, fmt: str, product_id: int | None,
         task.file_path, task.file_name = rel_path(target), target.name
     task.file_size = get_storage().abs_path(task.file_path).stat().st_size
     task.status = "completed"
-    task.finished_at = datetime.utcnow()
+    task.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     return task
 
@@ -138,7 +138,7 @@ def export_images_zip(db, export_id: int, image_ids: list[int] | None,
     task.file_name = target.name
     task.file_size = target.stat().st_size
     task.status = "completed"
-    task.finished_at = datetime.utcnow()
+    task.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     return task
 
@@ -223,7 +223,7 @@ def export_full_package(db, export_id: int, product_id: int) -> ExportTask:
         # 5. 审核报告
         reviews = db.query(ReviewItem).filter(ReviewItem.product_id == product_id).all()
         report = {
-            "generated_at": datetime.utcnow().isoformat(),
+            "generated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
             "note": "AI 检查不能替代平台官方审核；needs_manual=true 的项必须人工核实",
             "items": [{"target": r.target_type, "level": r.level, "code": r.rule_code,
                        "reason": r.reason, "location": r.location,
@@ -243,6 +243,6 @@ def export_full_package(db, export_id: int, product_id: int) -> ExportTask:
     task.file_name = target.name
     task.file_size = target.stat().st_size
     task.status = "completed"
-    task.finished_at = datetime.utcnow()
+    task.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     return task

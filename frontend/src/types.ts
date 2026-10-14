@@ -88,7 +88,7 @@ export interface ListingTask {
   is_simulated: boolean;
   model_name: string;
   error: string;
-  cost_usd: number;
+  cost_usd: number | null; // null = 费用未知（模型不在价格表）
   duration_ms: number;
   created_at: string;
   updated_at: string;
@@ -148,7 +148,7 @@ export interface ImageTask {
   is_simulated: boolean;
   model_name: string;
   error: string;
-  cost_usd: number;
+  cost_usd: number | null; // null = 费用未知（模型不在价格表）
   duration_ms: number;
   created_at: string;
   updated_at: string;
@@ -212,6 +212,13 @@ export interface Dashboard {
   image_configured: boolean;
   today_cost_usd: number;
   daily_budget_usd: number;
+}
+
+export interface TaskOverview {
+  listing_tasks: TaskStatus;
+  image_tasks: TaskStatus;
+  today_spend_usd: number;
+  today_unknown_cost_calls: number;
 }
 
 export interface TaskStatus {
