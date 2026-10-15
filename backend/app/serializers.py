@@ -35,6 +35,7 @@ def listing_task_out(t: ListingTask) -> ListingTaskOut:
         platform=t.platform, market=t.market, language=t.language,
         status=t.status, is_simulated=t.is_simulated, model_name=t.model_name,
         error=t.error, cost_usd=t.cost_usd, duration_ms=t.duration_ms,
+        epoch=t.epoch or 0,
         created_at=t.created_at, updated_at=t.updated_at,
         version=version_out(t.versions[-1]) if t.versions else None)
 
@@ -48,6 +49,7 @@ def image_task_out(t: ImageGenTask) -> ImageTaskOut:
         prompt=t.prompt, status=t.status, is_simulated=t.is_simulated,
         model_name=t.model_name,
         error=t.error, cost_usd=t.cost_usd, duration_ms=t.duration_ms,
+        epoch=t.epoch or 0,
         created_at=t.created_at, updated_at=t.updated_at,
         images=[generated_image_out(im) for im in t.images])
 

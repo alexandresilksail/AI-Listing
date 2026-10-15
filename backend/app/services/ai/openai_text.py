@@ -33,9 +33,10 @@ LISTING_SYSTEM_PROMPT = """你是资深跨境电商本地化文案专家，为�
 class OpenAITextAdapter(TextAdapter):
     name = "openai-compatible-text"
 
-    def __init__(self, *args, json_mode: str = "json_object", **kwargs):
-        super().__init__(*args, **kwargs)
-        self.json_mode = json_mode if json_mode in ("json_object", "none") else "json_object"
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120,
+                 max_retries: int = 2, json_mode: str = "json_object"):
+        super().__init__(base_url, api_key, model, timeout=timeout,
+                         max_retries=max_retries, json_mode=json_mode)
 
     def _post(self, client: httpx.Client, system: str, user: str,
               use_json_mode: bool) -> httpx.Response:
@@ -56,16 +57,23 @@ class OpenAITextAdapter(TextAdapter):
         )
 
     def _chat(self, system: str, user: str) -> tuple[str, int, int]:
-        """返回 (内容, tokens_in, tokens_out)。带超时、有限重试与 JSON 模式降级。"""
-        from ...config import effective_settings
+        """返回 (内容, tokens_in, tokens_out)。
+
+        - json_mode 取自实例配置（self.json_mode），真正影响请求体
+        - 供应商不支持 response_format（400）时自动降级重试一次
+        - 429/5xx 与网络异常按 max_retries 重试；其他 4xx（鉴权/模型不存在）
+          属客户端错误，重试无意义，立即失败
+        - httpx.Timeout 分段：连接/读/写/池分别设限，避免无限悬挂
+        """
         from ...security import scrub_secrets
-        s = effective_settings()
-        use_json_mode = s.text_json_mode == "json_object"
+        use_json_mode = self.json_mode == "json_object"
+        timeout = httpx.Timeout(connect=10.0, read=float(self.timeout),
+                                write=30.0, pool=10.0)
         last_err: Exception | None = None
         degraded = False  # 已因供应商不支持 json_object 而降级
         for attempt in range(self.max_retries + 1):
             try:
-                with httpx.Client(timeout=self.timeout) as client:
+                with httpx.Client(timeout=timeout) as client:
                     resp = self._post(client, system, user, use_json_mode)
                     # 供应商不支持 response_format：降级重试一次
                     if (resp.status_code == 400 and use_json_mode and not degraded
@@ -77,29 +85,53 @@ class OpenAITextAdapter(TextAdapter):
                     if resp.status_code == 429 or resp.status_code >= 500:
                         raise httpx.HTTPStatusError("rate limited/server error",
                                                     request=resp.request, response=resp)
+                    if resp.status_code >= 400:
+                        # 401/403/404 等客户端错误：重试无意义，立即失败
+                        raise RuntimeError(
+                            f"文本模型返回 HTTP {resp.status_code}：{scrub_secrets(resp.text[:300], self.api_key)}")
                     resp.raise_for_status()
                     data = resp.json()
                     content = data["choices"][0]["message"]["content"]
                     usage = data.get("usage") or {}
                     return (content, int(usage.get("prompt_tokens") or 0),
                             int(usage.get("completion_tokens") or 0))
-            except Exception as e:  # noqa: BLE001
+            except (httpx.TimeoutException, httpx.NetworkError) as e:
+                # 网络类异常可重试
                 last_err = e
                 if attempt == self.max_retries:
                     break
-        raise RuntimeError(f"文本模型调用失败：{scrub_secrets(str(last_err), s.text_api_key)}")
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if isinstance(e, RuntimeError) and "HTTP" in str(e):
+                    break  # 客户端错误不重试
+                if attempt == self.max_retries:
+                    break
+        raise RuntimeError(f"文本模型调用失败：{scrub_secrets(str(last_err), self.api_key)}")
 
     @staticmethod
     def _extract_json(text: str) -> dict:
+        """从模型响应提取 JSON 对象。
+
+        结构化输出异常（未返回 JSON / 响应截断 / 非法 JSON）一律抛
+        ValueError 并带上片段信息——调用方据此把任务标记 failed，
+        绝不把失败伪装成成功。
+        """
         text = text.strip()
         if text.startswith("```"):
             text = text.strip("`")
             if text.lower().startswith("json"):
                 text = text[4:]
         start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end == -1:
-            raise ValueError("模型未返回 JSON")
-        return json.loads(text[start:end + 1])
+        if start == -1 or end == -1 or end < start:
+            raise ValueError(
+                f"模型未返回 JSON 内容（响应前 200 字符：{text[:200]!r}）")
+        fragment = text[start:end + 1]
+        try:
+            return json.loads(fragment)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"模型返回的 JSON 解析失败（响应可能被截断）：{e}；"
+                f"片段前 200 字符：{fragment[:200]!r}") from e
 
     def generate_listing(self, *, product: dict, platform: str, market: str,
                          language: str, rules: list[dict]) -> TextGenResult:
@@ -129,10 +161,21 @@ class OpenAITextAdapter(TextAdapter):
 }}"""
         content, tin, tout = self._chat(LISTING_SYSTEM_PROMPT, user_prompt)
         fields = self._extract_json(content)
-        # 结构化校验
-        fields.setdefault("title", "")
-        fields.setdefault("bullets", [])
-        fields.setdefault("description", "")
+        # 结构化校验：核心字段缺失/类型错误一律判失败（不补空伪装成功）
+        for key in ("title", "bullets", "description"):
+            if key not in fields:
+                raise ValueError(f"模型返回缺少核心字段 {key}，任务标记失败以便重试")
+        if not isinstance(fields["title"], str):
+            raise ValueError("模型返回的 title 不是字符串")
+        if not isinstance(fields["bullets"], list):
+            raise ValueError("模型返回的 bullets 不是数组")
+        if not isinstance(fields["description"], str):
+            raise ValueError("模型返回的 description 不是字符串")
+        # 次要字段允许缺失，补空值并在备注中说明
+        missing = [k for k in ("faq", "search_terms", "image_alt", "marketing_slogan")
+                   if k not in fields]
+        if missing:
+            logger.warning("模型返回缺少次要字段：%s（已补空）", ", ".join(missing))
         fields.setdefault("faq", [])
         fields.setdefault("search_terms", "")
         fields.setdefault("image_alt", "")
@@ -166,6 +209,11 @@ class OpenAITextAdapter(TextAdapter):
             "你是亚马逊 SEO 关键词研究员。只基于商品资料推导关键词，不虚构任何搜索量/竞争度数据。必须输出 JSON。",
             user_prompt)
         fields = self._extract_json(content)
+        for key in ("keywords", "titles"):
+            if key not in fields:
+                raise ValueError(f"模型返回缺少核心字段 {key}，任务标记失败以便重试")
+            if not isinstance(fields[key], list):
+                raise ValueError(f"模型返回的 {key} 不是数组")
         cost = self.estimate_cost(tin, tout)
         return TextGenResult(fields=fields, model=self.model, tokens_in=tin,
                              tokens_out=tout, cost_usd=cost, cost_known=cost is not None,

@@ -94,6 +94,9 @@ class ListingTask(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     idempotency_key: Mapped[str] = mapped_column(String(128), default="", index=True)
+    # epoch：任务版本号。每次提交/重试/恢复 +1；worker 执行前后校验，
+    # epoch 已变（期间被重试）则丢弃本次执行结果，防止旧执行覆盖重试任务。
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
@@ -193,6 +196,8 @@ class ImageGenTask(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     idempotency_key: Mapped[str] = mapped_column(String(128), default="", index=True)
+    # epoch：任务版本号（同 ListingTask，防旧执行覆盖重试结果）
+    epoch: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
@@ -270,6 +275,10 @@ class ApiCallLog(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     # cost_usd: NULL 表示费用未知（模型不在价格表）；仅费用已知的调用计入预算统计
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # cost_basis: actual=调用返回实际用量计费 / estimated=按价格表预估 / unknown=价格未知
+    cost_basis: Mapped[str] = mapped_column(String(16), default="estimated")
+    # price_version: 计费用价格表版本（PRICING_VERSION），便于追溯估算依据
+    price_version: Mapped[str] = mapped_column(String(32), default="")
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str] = mapped_column(Text, default="")  # 绝不记录密钥

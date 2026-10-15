@@ -90,6 +90,7 @@ export interface ListingTask {
   error: string;
   cost_usd: number | null; // null = 费用未知（模型不在价格表）
   duration_ms: number;
+  epoch: number; // 任务版本号（提交/重试递增）
   created_at: string;
   updated_at: string;
   version: ListingVersion | null;
@@ -150,6 +151,7 @@ export interface ImageTask {
   error: string;
   cost_usd: number | null; // null = 费用未知（模型不在价格表）
   duration_ms: number;
+  epoch: number; // 任务版本号（提交/重试递增）
   created_at: string;
   updated_at: string;
   images: GeneratedImage[];

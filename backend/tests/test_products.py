@@ -25,7 +25,6 @@ def test_create_list_get_product(client):
 
     got = client.get(f"/api/products/{pid}").json()
     assert got["name"] == "商品A"
-    return pid
 
 
 def test_update_product(client, product_id):

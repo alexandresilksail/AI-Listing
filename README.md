@@ -2,7 +2,7 @@
 
 面向亚马逊、Temu、独立站中小卖家的 AI 跨境电商 Listing 与商品图片生成平台。
 
-> **当前版本：V1.1**（安全加固 + 任务可靠性 + 成本准确性，详见 [`docs/V1.1修复与审计交付报告.md`](docs/V1.1修复与审计交付报告.md)）
+> **当前版本：V1.2**（文本适配器加固 / 前端 Token 清零 / 任务 epoch 防覆盖 / 路径安全 / 预算原子预留 / Alembic 迁移，详见 [`docs/V1.2修复与审计交付报告.md`](docs/V1.2修复与审计交付报告.md)）
 
 > **核心工作流**：上传商品资料与图片 → 选择销售市场和平台 → 生成本地化多语种 Listing → 生成商品营销图片 → 自动检查文案与图片风险 → 人工审核 → 批量导出。
 
@@ -40,6 +40,10 @@ V1.1 起**所有 API 默认要求令牌**（`/api/health`、`/api/meta` 除外�
 - **`PL_ENV=production` 且未配置令牌时，服务直接拒绝启动**（fail-fast，绝不带病上线）
 - 开发环境（默认）未配置令牌时会打印醒目警告，仍可本地试用
 - 前端首次遇到 401 会弹出输入框，令牌保存在浏览器 localStorage，后续请求自动携带
+
+**V1.2 安全红线**：令牌**绝不通过构建参数注入前端**（`VITE_API_TOKEN` 已移除）——任何构建期内置的密钥都会被打进 JS bundle 与 Source Map，等同于向所有访客公开。前端只允许运行时输入。
+
+**架构局限（诚实说明）**：当前为单一共享 Token 架构，**未实现多用户隔离**——任何持有令牌的调用方都拥有全部管理权限。多用户/权限体系需后续引入登录态与 RBAC，不在当前版本范围。
 
 ---
 
@@ -80,11 +84,13 @@ V1.1 起**所有 API 默认要求令牌**（`/api/health`、`/api/meta` 除外�
 ### ✅ 批量任务与成本管理
 独立后台线程运行的任务队列（自有事件循环，`call_soon_threadsafe` 跨线程安全入队），单 worker 串行执行。支持：
 
+- **epoch 任务版本号**：每次提交/重试/恢复 +1；终态条件写入（`WHERE id=? AND epoch=?`），超时后醒来的旧执行发现 epoch 已变即丢弃结果，**绝不覆盖重试任务**
 - **启动恢复对账**：重启后 pending 任务自动重新入队，processing 中任务标记 failed（不留僵尸状态）
 - 幂等去重（防止重复点击导致重复扣费，线程锁保护查重+落库）
 - 失败重试、单任务超时（`PL_TASK_TIMEOUT_SEC`）、worker 异常留痕且队列不崩溃
-- 执行前预算检查（listing 按预估算、image 按张数）、每日预算、锁保护防并发绕过
+- **预算原子预留**：`check_and_reserve` 持锁检查+预留、`release_reservation` 成对释放，消除「检查通过→执行结束」窗口内的并发超支
 - **成本三态**：实际 / 估算 / **未知**。未知模型价格**绝不按 0 计**（`cost_usd=NULL` + `cost_known=false`），任务总览可查看「今日未知费用调用数」，可按 `PL_UNKNOWN_COST_POLICY`（allow/block）管控
+- 调用日志记录 `cost_basis`（estimated/actual/unknown）与 `price_version`（价格表版本），估算依据可追溯
 - 调用耗时与费用记录，文本与图片分别统计
 
 ### ✅ 导出与交付
@@ -112,8 +118,9 @@ V1.1 起**所有 API 默认要求令牌**（`/api/health`、`/api/meta` 除外�
 | 数据处理 | pandas + openpyxl（Excel）、Pillow（图片） |
 | 任务 | 独立线程 + 私有事件循环队列（内建，可替换 Celery + Redis） |
 | 迁移 | Alembic（`migrations/`） |
-| 测试 | pytest + FastAPI TestClient（120 项） |
+| 测试 | pytest + FastAPI TestClient（171 项） |
 | 部署 | Docker Compose（前端多阶段构建进 Nginx + 后端）+ Nginx |
+| 迁移 | Alembic（`migrations/versions/`，启动自动 upgrade head，迁移前自动备份） |
 
 ---
 
@@ -206,7 +213,7 @@ pip install -r requirements.txt
 pytest tests -v
 ```
 
-最近一次真实测试结果：**120 passed**（36 原有 + 84 新增，见 `docs/测试报告.md`）。
+最近一次真实测试结果：**171 passed**（120 V1.1 + 51 V1.2 新增，见 `docs/测试报告.md`）。
 
 端到端验证（服务运行中，带令牌跑完整工作流）：
 
@@ -215,18 +222,26 @@ PL_API_TOKEN=<令牌> python scripts/e2e_verify.py
 # 输出 19 步结果：种子 → 多市场 Listing → 图片 → 审核 → 4 种导出
 ```
 
+数据库迁移（V1.0/V1.1 旧库升级到 V1.2，启动时自动执行，也可手动）：
+
+```bash
+cd backend
+alembic upgrade head        # 迁移前自动备份 <db>.bak-<时间戳>；失败自动回滚、绝不清库
+```
+
 ---
 
 ## 安全设计
 
-- **API 令牌鉴权**：全局依赖，`Authorization: Bearer` / `X-API-Token` 双方式，`hmac.compare_digest` 常量时间比较；生产模式无令牌拒绝启动
+- **API 令牌鉴权**：全局依赖，`Authorization: Bearer` / `X-API-Token` 双方式，`hmac.compare_digest` 常量时间比较；生产模式无令牌拒绝启动；**令牌不进前端构建产物**（V1.2 红线，有测试强制）
 - API Key **仅保存在服务端**（环境变量或 `data/runtime_settings.json`，文件权限 600），API 响应中**永远返回脱敏字段**，错误信息与日志经 `scrub_secrets()` 过滤，不输出密钥（有测试覆盖）
-- **SSRF 防护**：出站请求前解析域名并逐 IP 校验（私网/环回/链路本地/云元数据 169.254.169.254/IPv6 ULA 全黑名单），重定向逐跳校验且主机锁定，流式下载大小上限（`PL_MAX_DOWNLOAD_MB`）
+- **SSRF 防护**：出站请求前解析域名并逐 IP 校验（私网/环回/链路本地/云元数据 169.254.169.254/IPv6 ULA 全黑名单），重定向逐跳校验且主机锁定，流式下载大小上限 + **响应内容类型白名单** + 分段超时（连接/读/写）。已知限制：DNS 重绑定（校验与连接间的 TOCTOU）以逐跳校验缓解，彻底防护需连接层绑定 IP（与 HTTPS 证书校验冲突），高风险部署请走受控出网代理
 - 上传校验：扩展名白名单 + 文件大小限制 + **文件魔数校验** + **PIL 完整解码验证** + `MAX_IMAGE_PIXELS` 防解压炸弹
-- 路径穿越防护：所有文件读写经 `safe_join` 校验目标必须在存储根目录内
+- 路径穿越防护：`safe_join` 使用 `Path.relative_to()` 目录组件级校验——**不用 `str.startswith`**（同前缀目录如 `/data/images_evil` 会绕过 startswith），`resolve()` 规范化 `..`/绝对路径/符号链接指向
 - CSV 导出公式注入防护：`= + - @` 前缀自动转义
 - 幂等去重：相同任务提交复用同一幂等键，线程锁保护，避免重复扣费
-- 模型调用：超时、有限重试、预估成本超预算直接拒绝；预算检查持锁防并发绕过
+- 模型调用：分段超时、有限重试（429/5xx/网络异常重试，4xx 客户端错误不重试）、预估成本超预算直接拒绝；预算检查持锁 + 原子预留防并发穿透
+- 结构化输出校验：核心字段缺失/类型错误/JSON 截断一律判失败，**绝不补空伪装成功**
 
 ---
 
@@ -238,7 +253,9 @@ PL_API_TOKEN=<令牌> python scripts/e2e_verify.py
 4. **参数提取为启发式**——从中文详情抽取的参数默认未验证，需用户确认后才视为可信事实。
 5. **规则基线需以平台官方最新规则为准**——内置规则均标记 `needs_verify`。
 6. 内建任务队列为单 worker，大规模并发场景建议替换为 Celery + Redis（接口已按此设计）。
-7. **Docker Compose 未经本机容器实机验证**——配置经静态校验（YAML 合法、COPY 路径存在、healthcheck/卷/上下文正确），但交付机器未安装 Docker，首次部署请在目标机执行 `docker compose up -d --build` 验证。
-8. **真实 OpenAI 兼容 API 未联调**——AI 适配器按 OpenAI 兼容协议实现并有单测覆盖，但未使用真实 Key 调用过；`json_mode` 降级、按模型尺寸映射等兼容逻辑靠测试保证。接入真实 Key 后请先小批量验证。
-9. **SQLite 旧库升级需手动处理**——V1.1 将 `cost_usd` 改为可空，`init_db()` 不会 ALTER 已存在的表。从 V1.0 升级请删除 `backend/data/polylisting.db` 重新初始化（或改用 Alembic 迁移）；全新部署不受影响。
-10. 任务超时后 worker 线程可能短暂驻留至底层 HTTP 调用返回——队列不阻塞、不重复扣费（幂等键保护），但极端网络悬挂场景下该线程资源释放依赖调用方超时。
+7. **单一共享 Token 架构，未实现多用户隔离**——任何持有令牌的调用方拥有全部管理权限（V1.2 如实说明，不宣称已做用户体系）。
+8. **DNS 重绑定为已知 SSRF 残留窗口**——URL 校验与实际连接之间存在 TOCTOU；当前以逐跳校验+主机锁定缓解，彻底防护需连接层绑定 IP（与 HTTPS 证书校验冲突）。
+9. **Docker Compose 未经本机容器实机验证**——配置经静态校验（YAML 合法、COPY 路径存在、healthcheck/卷/上下文正确），但交付机器未安装 Docker，首次部署请在目标机执行 `docker compose up -d --build` 验证。
+10. **真实 OpenAI 兼容 API 未联调**——AI 适配器按 OpenAI 兼容协议实现并有单测覆盖（含 mock 成功/超时/限流/服务端错误/非法响应路径），但未使用真实 Key 调用过；接入后请先小批量验证，并把实际模型价格补入 `PRICING`。
+11. **任务超时后僵尸线程竞态**——`asyncio.wait_for` 超时只取消等待，底层同步线程可能仍在运行；epoch 机制保证其结果不会覆盖重试任务、幂等键防重复扣费，但该线程资源释放依赖调用方超时（`PL_REQUEST_TIMEOUT_SEC`）。
+12. **预算「未知费用」为盲区**——`PL_UNKNOWN_COST_POLICY=allow` 时未知费用调用不预留、不计入已花费，仅单独计数提示；成本敏感场景请用 `block` 或补齐价格表。

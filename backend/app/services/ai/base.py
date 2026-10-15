@@ -14,6 +14,11 @@ class AINotConfigured(Exception):
     """未配置 API：调用方必须将结果标记为“模拟”，不得伪造真实调用。"""
 
 
+# 价格表版本：调整 PRICING / PRICING_PER_IMAGE 时同步递增，
+# 每次调用记录都会带上该版本，便于追溯「估算依据」。
+PRICING_VERSION = "2026-10-15.1"
+
+
 @dataclass
 class TextGenResult:
     fields: dict                       # 结构化 Listing 字段
@@ -39,12 +44,19 @@ class TextAdapter:
 
     name = "base"
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120, max_retries: int = 2):
+    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 120,
+                 max_retries: int = 2, json_mode: str = "json_object"):
+        """统一初始化接口：基类/注册器/具体适配器签名一致。
+
+        json_mode: "json_object" 请求 response_format；"none" 不请求
+        （供应商不支持时由适配器内部自动降级，见 OpenAITextAdapter）。
+        """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
+        self.json_mode = json_mode if json_mode in ("json_object", "none") else "json_object"
 
     def available(self) -> bool:
         return bool(self.base_url and self.api_key)

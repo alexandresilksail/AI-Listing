@@ -2,13 +2,15 @@ import axios from "axios";
 
 const TOKEN_KEY = "pl_api_token";
 
-/** 获取 API 访问令牌：优先 localStorage（运行时输入），其次构建时环境变量。 */
+/**
+ * 获取 API 访问令牌：仅从 localStorage 读取（运行时由用户输入）。
+ *
+ * 安全红线（V1.2）：禁止读取 import.meta.env.VITE_API_TOKEN——
+ * 构建期内置的密钥会被打进 JS bundle 与 Source Map，等同公开泄露。
+ * 令牌只允许在运行时由用户输入后存入本浏览器。
+ */
 export function getApiToken(): string {
-  return (
-    localStorage.getItem(TOKEN_KEY) ||
-    (import.meta.env.VITE_API_TOKEN as string | undefined) ||
-    ""
-  );
+  return localStorage.getItem(TOKEN_KEY) || "";
 }
 
 export function setApiToken(token: string): void {

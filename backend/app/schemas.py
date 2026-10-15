@@ -147,6 +147,7 @@ class ListingTaskOut(BaseModel):
     error: str
     cost_usd: float | None = None  # None = 费用未知（模型不在价格表）
     duration_ms: int
+    epoch: int = 0  # 任务版本号（提交/重试递增，防旧执行覆盖）
     created_at: datetime
     updated_at: datetime
     version: ListingVersionOut | None = None
@@ -251,6 +252,7 @@ class ImageTaskOut(BaseModel):
     error: str
     cost_usd: float | None = None  # None = 费用未知（模型不在价格表）
     duration_ms: int
+    epoch: int = 0  # 任务版本号（提交/重试递增，防旧执行覆盖）
     created_at: datetime
     updated_at: datetime
     images: list[GeneratedImageOut] = []

@@ -32,8 +32,15 @@ taskkill /PID <PID> /F
 ### 所有接口 401 Unauthorized（V1.1）
 后端配置了 `PL_API_TOKEN`。请求需带头 `X-API-Token: <令牌>` 或 `Authorization: Bearer <令牌>`。前端会在 401 时弹框引导输入；令牌存在 localStorage（键 `pl_api_token`），清除它即可重新输入。
 
-### 从 V1.0 升级后任务提交 500：`NOT NULL constraint failed: listing_tasks.cost_usd`
-V1.1 将费用字段改为可空，「未知费用」不再按 0 计。旧库表结构不会自动变更。解决：停止服务 → 删除 `backend/data/polylisting.db` → 重启（会按新结构重建）；生产库请写 Alembic 迁移 `ALTER COLUMN cost_usd DROP NOT NULL`。详见 Linux 部署指南「V1.0 → V1.1 升级特别说明」。
+### 从 V1.0/V1.1 升级后任务提交 500 或列不存在
+V1.2 起启动时会**自动执行 Alembic 迁移**（迁移前自动备份 `<db>.bak-<时间戳>`），旧库自动升级，无需手动操作。若迁移失败，服务会拒绝启动并提示备份路径——检查日志中 `polylisting.db` 输出，或手动执行：
+
+```bash
+cd backend && alembic upgrade head
+```
+
+### 所有接口 401 Unauthorized（V1.1/V1.2）
+后端配置了 `PL_API_TOKEN`。请求需带头 `X-API-Token: <令牌>` 或 `Authorization: Bearer <令牌>`。前端会在 401 时弹框引导输入；令牌存在 localStorage（键 `pl_api_token`），清除它即可重新输入。**令牌不会也不允许通过构建参数注入前端**（会被打包进 JS 公开泄露）。
 
 ## 二、生成类
 
@@ -124,4 +131,4 @@ cd backend
 pytest tests -v
 ```
 
-参考最近一次基线结果：[`测试报告.md`](测试报告.md)（120 项全部通过）。
+参考最近一次基线结果：[`测试报告.md`](测试报告.md)（171 项全部通过）。

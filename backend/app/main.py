@@ -27,6 +27,9 @@ async def lifespan(app: FastAPI):
     s.validate_production()
     warn_if_insecure()
     init_db()
+    # 运行 Alembic 增量迁移（迁移前自动备份；失败回滚并阻止启动，绝不清库）
+    from .database import apply_migrations
+    apply_migrations()
     # 初始化内置平台规则（幂等）
     from .database import get_sessionmaker
     db = get_sessionmaker()()
@@ -43,7 +46,7 @@ async def lifespan(app: FastAPI):
     await queue.stop()
 
 
-app = FastAPI(title="PolyListing AI", version="1.1.0", lifespan=lifespan,
+app = FastAPI(title="PolyListing AI", version="1.2.0", lifespan=lifespan,
               dependencies=[Depends(require_api_token)])
 
 s = effective_settings()

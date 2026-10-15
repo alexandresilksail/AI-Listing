@@ -151,22 +151,35 @@ def assert_url_allowed(url: str, *, allow_insecure: bool | None = None) -> None:
             raise ValueError(f"URL 指向不允许访问的地址（{host} → {ip_text}）")
 
 
+# 允许下载的响应内容类型（模型返回图片 URL 时的白名单）
+_ALLOWED_CONTENT_TYPES = ("image/png", "image/jpeg", "image/jpg", "image/webp")
+
+
 def safe_download(url: str, *, max_bytes: int | None = None,
                   timeout: int = 60) -> bytes:
     """安全下载模型返回的图片 URL：SSRF 校验 + 大小上限 + 重定向管控。
 
     - 首次请求前校验 URL；重定向目标逐跳校验（最多 5 跳）
     - 流式读取，超过 max_bytes 立即中断
+    - 响应 Content-Type 必须在图片白名单内（防止下载 HTML/脚本等非图片内容）
+    - 连接/读/写分段超时，避免悬挂
     - insecure 模式（开发调试）下锁定主机：重定向不得跳转到其他主机，
       防止利用本地白名单跳转到云元数据等内网地址
     - 同步实现（调用链运行在 worker 线程中）
+
+    已知限制（DNS 重绑定）：URL 校验与实际连接之间存在 TOCTOU 窗口，
+    攻击者可让域名在校验后解析到内网 IP。彻底防护需在连接层绑定
+    校验时的 IP（与 HTTPS 证书校验冲突），当前以「逐跳校验 + 主机锁定」
+    缓解；高风险部署请将出网代理到受控出口。
     """
     from urllib.parse import urlparse
     s = effective_settings()
     limit = max_bytes if max_bytes is not None else s.max_download_mb * 1024 * 1024
     current = url
     locked_host = urlparse(url).hostname if s.allow_insecure_download else None
-    with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+    http_timeout = httpx.Timeout(connect=10.0, read=float(timeout),
+                                 write=30.0, pool=10.0)
+    with httpx.Client(timeout=http_timeout, follow_redirects=False) as client:
         for _hop in range(6):
             assert_url_allowed(current)
             if locked_host and urlparse(current).hostname != locked_host:
@@ -180,6 +193,9 @@ def safe_download(url: str, *, max_bytes: int | None = None,
                     continue
                 if resp.status_code >= 400:
                     raise ValueError(f"下载失败：HTTP {resp.status_code}")
+                ctype = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if ctype and ctype not in _ALLOWED_CONTENT_TYPES:
+                    raise ValueError(f"不允许的响应内容类型：{ctype or '?'}（仅接受图片）")
                 declared = resp.headers.get("content-length")
                 if declared and int(declared) > limit:
                     raise ValueError(f"响应体超过大小上限（{limit // 1024 // 1024}MB）")
@@ -196,12 +212,30 @@ def safe_download(url: str, *, max_bytes: int | None = None,
 
 # ---------------------------------------------------------------- 路径与文件
 def safe_join(base: Path, *parts: str) -> Path:
-    """防止路径穿越：拼接后必须仍在 base 内。"""
-    base = base.resolve()
-    target = (base.joinpath(*parts)).resolve()
-    if not str(target).startswith(str(base)):
-        raise ValueError("非法路径")
+    """防止路径穿越：拼接后必须仍在 base 内。
+
+    使用 Path.relative_to() 做「目录组件级」包含校验——
+    绝不使用 str.startswith：那会被同前缀目录绕过
+    （base=/data/images 时 /data/images_evil/x.png 也会通过 startswith）。
+    resolve() 同时规范化 `..`、绝对路径混入与符号链接指向，
+    逃逸目标（含链接到 base 外的软链）一律拒绝。
+    """
+    base = Path(base).resolve()
+    target = base.joinpath(*parts).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError as e:
+        raise ValueError("非法路径：目标不在允许的存储目录内") from e
     return target
+
+
+def is_within(base: Path, target: Path) -> bool:
+    """可靠的目录包含判断（供删除/下载前二次校验）。"""
+    try:
+        Path(target).resolve().relative_to(Path(base).resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def sanitize_filename(name: str) -> str:

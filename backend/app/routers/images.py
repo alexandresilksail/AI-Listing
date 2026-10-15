@@ -57,6 +57,7 @@ def create_task(payload: ImageTaskCreate, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(task)
         get_queue().submit("image", task.id, payload.idempotency_key or f"image:{task.id}")
+        db.refresh(task)  # submit 在独立 session 递增 epoch，需刷新后输出
     return image_task_out(task)
 
 

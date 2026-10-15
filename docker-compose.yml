@@ -45,9 +45,9 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-      args:
-        # 可选：构建期内置默认 API 令牌（与 PL_API_TOKEN 一致）
-        VITE_API_TOKEN: ${PL_API_TOKEN:-}
+      # 安全红线：禁止将 PL_API_TOKEN 作为 build-arg 传入前端构建——
+      # 任何构建期内置的密钥都会被打进 JS bundle / Source Map，
+      # 等同于向所有访客公开。前端令牌一律运行时由用户输入并存入 localStorage。
     container_name: polylisting-frontend
     restart: unless-stopped
     depends_on:

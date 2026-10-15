@@ -87,11 +87,23 @@ def _placeholder_image(task: ImageGenTask, product: Product, index: int) -> byte
     return buf.getvalue()
 
 
-def run_image_task(db, task_id: int) -> ImageGenTask:
-    """执行单个图片生成任务（由任务队列调用）。"""
+def run_image_task(db, task_id: int, epoch: int | None = None) -> ImageGenTask:
+    """执行单个图片生成任务（由任务队列调用）。
+
+    epoch：提交时的任务版本号。执行前校验，执行后条件写终态——
+    期间任务被重试（epoch 已变）时放弃本次执行，绝不覆盖重试任务。
+    已成功生成的图片保留（单张失败不清空整批）。
+    """
+    from .ai.base import PRICING_VERSION
+    from .task_queue import TaskQueue
     task: ImageGenTask | None = db.get(ImageGenTask, task_id)
     if task is None:
         raise ValueError("任务不存在")
+    if TaskQueue.epoch_stale(db, ImageGenTask, task_id, epoch):
+        logger.info("丢弃过期执行：图片任务 %s epoch=%s（已被重试或重置）",
+                    task_id, epoch)
+        return task
+
     task.status = "processing"
     task.error = ""
     db.commit()
@@ -99,9 +111,9 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
     started = time.monotonic()
     product = db.get(Product, task.product_id)
     if product is None:
-        task.status = "failed"
-        task.error = "商品不存在或已删除"
-        db.commit()
+        TaskQueue.finalize(db, ImageGenTask, task_id, epoch, {
+            "status": "failed", "error": "商品不存在或已删除"})
+        db.refresh(task)
         return task
 
     refs: list[ProductImage] = []
@@ -116,16 +128,16 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
     model_name = ""
     cost: float | None = None
     produced: list[bytes] = []
+    est: float | None = None
 
     try:
         if image_available():
             adapter = get_image_adapter()
             model_name = adapter.model
             size = adapter.size_for(task.aspect_ratio)
-            # 执行前预算检查（图片费用可按张数预估；未知模型价格时按策略处理）
-            from .task_queue import TaskQueue
+            # 执行前预算检查 + 原子预留（图片费用按张数预估）；finally 中释放
             est = adapter.estimate_cost(task.count)  # None = 费用未知
-            ok, msg = TaskQueue.check_budget(est, effective_settings().per_task_budget_usd)
+            ok, msg = TaskQueue.check_and_reserve(est, effective_settings().per_task_budget_usd)
             if not ok:
                 raise RuntimeError(f"预算检查未通过：{msg}")
             if msg:
@@ -140,7 +152,9 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
             cost = result.cost_usd  # None = 费用未知
             db.add(ApiCallLog(provider=adapter.name, model=model_name, purpose="image",
                               status="success", latency_ms=int((time.monotonic() - started) * 1000),
-                              cost_usd=cost))
+                              cost_usd=cost,
+                              cost_basis=("estimated" if cost is not None else "unknown"),
+                              price_version=PRICING_VERSION))
         else:
             is_simulated = True
             for i in range(task.count):
@@ -150,13 +164,18 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
                               latency_ms=int((time.monotonic() - started) * 1000),
                               error="图像模型 API 未配置，生成模拟占位图"))
     except Exception as e:  # noqa: BLE001
-        task.status = "failed"
-        task.error = str(e)
-        task.duration_ms = int((time.monotonic() - started) * 1000)
+        TaskQueue.finalize(db, ImageGenTask, task_id, epoch, {
+            "status": "failed", "error": str(e),
+            "duration_ms": int((time.monotonic() - started) * 1000)})
         db.add(ApiCallLog(provider="openai-compatible", model=model_name, purpose="image",
-                          status="failed", latency_ms=task.duration_ms, error=str(e)))
+                          status="failed", latency_ms=int((time.monotonic() - started) * 1000),
+                          error=str(e), price_version=PRICING_VERSION))
         db.commit()
+        db.refresh(task)
         return task
+    finally:
+        # 无论成功/失败都释放预算预留（未知费用未预留，无需释放）
+        TaskQueue.release_reservation(est)
 
     # 已成功生成的部分保留（任务失败不清空已产出）
     from ..security import verify_image_bytes
@@ -180,16 +199,24 @@ def run_image_task(db, task_id: int) -> ImageGenTask:
             version=existing + i + 1))
         saved += 1
 
-    task.status = "completed" if saved == task.count else "partial"
-    task.is_simulated = is_simulated
-    task.model_name = model_name or ("simulated" if is_simulated else "")
-    task.cost_usd = cost  # None = 费用未知
-    task.duration_ms = int((time.monotonic() - started) * 1000)
+    # 条件写终态：epoch 已变（期间被重试）则本次结果作废
+    final_status = "completed" if saved == task.count else "partial"
+    error_text = ""
     if saved < task.count:
-        task.error = f"成功 {saved}/{task.count} 张，其余失败"
+        error_text = f"成功 {saved}/{task.count} 张，其余失败"
         if invalid:
-            task.error += f"（其中 {invalid} 张不是有效图片已丢弃）"
-    db.commit()
+            error_text += f"（其中 {invalid} 张不是有效图片已丢弃）"
+    written = TaskQueue.finalize(db, ImageGenTask, task_id, epoch, {
+        "status": final_status, "is_simulated": is_simulated,
+        "model_name": model_name or ("simulated" if is_simulated else ""),
+        "cost_usd": cost,  # None = 费用未知
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "error": error_text})
+    if not written:
+        logger.info("图片任务 %s 执行期间被重试，本次结果已丢弃（epoch=%s）",
+                    task_id, epoch)
+        db.refresh(task)
+        return task
 
     # 生成后自动执行图片审核
     try:

@@ -52,6 +52,7 @@ def create_tasks(payload: ListingTaskCreate, db: Session = Depends(get_db)):
             db.refresh(task)
             queue.submit("listing", task.id,
                          payload.idempotency_key or f"listing:{task.id}")
+            db.refresh(task)  # submit 在独立 session 递增 epoch，需刷新后输出
             out.append(_task_out(task))
     return out
 

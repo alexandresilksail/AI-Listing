@@ -99,3 +99,21 @@ def wait_task(client):
         raise AssertionError(f"任务 {kind}#{task_id} 在 {timeout}s 内未结束：{last}")
 
     return _wait
+
+
+@pytest.fixture
+def settings_env(monkeypatch):
+    """临时修改 PL_ 环境变量并清空 settings 缓存（全局 fixture）。
+
+    用法：settings_env(text_api_key="sk-x", daily_budget_usd=5)
+    退出时自动恢复环境变量与缓存。
+    """
+    from app.config import get_settings
+
+    def _set(**kw):
+        for k, v in kw.items():
+            monkeypatch.setenv(f"PL_{k.upper()}", str(v))
+        get_settings.cache_clear()
+
+    yield _set
+    get_settings.cache_clear()

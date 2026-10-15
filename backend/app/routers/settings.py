@@ -86,4 +86,6 @@ def cost_logs(limit: int = 50, db: Session = Depends(get_db)):
     return [{"id": r.id, "provider": r.provider, "model": r.model, "purpose": r.purpose,
              "status": r.status, "latency_ms": r.latency_ms, "cost_usd": r.cost_usd,
              "cost_known": r.cost_usd is not None,
+             "cost_basis": r.cost_basis, "price_version": r.price_version,
+             "tokens_in": r.tokens_in, "tokens_out": r.tokens_out,
              "error": r.error, "created_at": r.created_at.isoformat()} for r in rows]

@@ -14,9 +14,10 @@ RUN npm ci --no-audit --no-fund
 COPY frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts \
      frontend/tailwind.config.js frontend/postcss.config.js frontend/index.html ./
 COPY frontend/src/ ./src/
-# 构建时可通过 build-arg 注入默认 API 令牌（亦可留空，运行时由用户在页面输入）
-ARG VITE_API_TOKEN=""
-ENV VITE_API_TOKEN=$VITE_API_TOKEN
+# 安全红线：本镜像不接受任何密钥类 build-arg。
+# 前端访问令牌（PL_API_TOKEN）绝不进入构建层——否则会被打包进
+# dist/*.js 与 Source Map，等同公开泄露。前端改为运行时输入：
+# 用户首次访问时由页面提示输入，存入浏览器 localStorage。
 RUN npm run build
 
 # ---------------------------------------------------------------- 运行阶段

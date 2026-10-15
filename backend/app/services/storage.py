@@ -1,6 +1,7 @@
 """存储服务：可替换存储接口。开发环境使用本地文件系统，生产可扩展对象存储。"""
 from __future__ import annotations
 
+import logging
 import shutil
 import uuid
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Protocol
 
 from ..config import EXPORTS_DIR, IMAGES_DIR, UPLOADS_DIR
 from ..security import safe_join, sanitize_filename
+
+logger = logging.getLogger("polylisting.storage")
 
 
 class StorageBackend(Protocol):
@@ -57,12 +60,18 @@ class LocalStorage:
         return safe_join(root, *parts[1:])
 
     def delete(self, rel_path: str) -> None:
+        """删除存储内文件。路径校验失败或文件不存在时记录日志但不抛出
+        （删除是幂等的；安全校验失败绝不误删其他商品文件）。"""
         try:
             p = self.abs_path(rel_path)
+        except ValueError:
+            logger.warning("删除被安全校验拦截：%s", rel_path)
+            return
+        try:
             if p.exists():
                 p.unlink()
-        except Exception:
-            pass
+        except OSError as e:
+            logger.warning("删除文件失败 %s: %s", rel_path, e)
 
 
 _storage: LocalStorage | None = None

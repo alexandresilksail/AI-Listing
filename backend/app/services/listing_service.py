@@ -165,11 +165,22 @@ def _simulate_listing(product: Product, platform: str, market: str, language: st
     }
 
 
-def run_listing_task(db, task_id: int) -> ListingTask:
-    """执行单个 Listing 生成任务（由任务队列调用）。"""
+def run_listing_task(db, task_id: int, epoch: int | None = None) -> ListingTask:
+    """执行单个 Listing 生成任务（由任务队列调用）。
+
+    epoch：提交时的任务版本号。执行前校验，执行后条件写终态——
+    期间任务被重试（epoch 已变）时放弃本次执行，绝不覆盖重试任务。
+    """
+    from .ai.base import PRICING_VERSION
+    from .task_queue import TaskQueue
     task: ListingTask | None = db.get(ListingTask, task_id)
     if task is None:
         raise ValueError("任务不存在")
+    if TaskQueue.epoch_stale(db, ListingTask, task_id, epoch):
+        logger.info("丢弃过期执行：Listing 任务 %s epoch=%s（已被重试或重置）",
+                    task_id, epoch)
+        return task
+
     task.status = "processing"
     task.error = ""
     db.commit()
@@ -177,9 +188,9 @@ def run_listing_task(db, task_id: int) -> ListingTask:
     started = time.monotonic()
     product = db.get(Product, task.product_id)
     if product is None:
-        task.status = "failed"
-        task.error = "商品不存在或已删除"
-        db.commit()
+        TaskQueue.finalize(db, ListingTask, task_id, epoch, {
+            "status": "failed", "error": "商品不存在或已删除"})
+        db.refresh(task)
         return task
 
     facts = product_facts(db, task.product_id)
@@ -188,15 +199,15 @@ def run_listing_task(db, task_id: int) -> ListingTask:
     model_name = ""
     cost: float | None = None
     fields: dict = {}
+    est: float | None = None
 
     try:
         if text_available():
             adapter = get_text_adapter()
             model_name = adapter.model
-            # 执行前预算检查（预估算费用；未知模型价格时按策略处理）
-            from .task_queue import TaskQueue
+            # 执行前预算检查 + 原子预留（防并发超支）；finally 中释放
             est = _estimate_text_cost(adapter, facts, rules)
-            ok, msg = TaskQueue.check_budget(est, effective_settings().per_task_budget_usd)
+            ok, msg = TaskQueue.check_and_reserve(est, effective_settings().per_task_budget_usd)
             if not ok:
                 raise RuntimeError(f"预算检查未通过：{msg}")
             if msg:
@@ -208,7 +219,10 @@ def run_listing_task(db, task_id: int) -> ListingTask:
             cost = result.cost_usd  # None = 费用未知
             db.add(ApiCallLog(provider=adapter.name, model=model_name, purpose="listing",
                               status="success", latency_ms=int((time.monotonic() - started) * 1000),
-                              cost_usd=cost, tokens_in=result.tokens_in,
+                              cost_usd=cost,
+                              cost_basis=("estimated" if cost is not None else "unknown"),
+                              price_version=PRICING_VERSION,
+                              tokens_in=result.tokens_in,
                               tokens_out=result.tokens_out))
         else:
             is_simulated = True
@@ -218,13 +232,18 @@ def run_listing_task(db, task_id: int) -> ListingTask:
                               latency_ms=int((time.monotonic() - started) * 1000),
                               error="文本模型 API 未配置，返回模拟演示内容"))
     except Exception as e:  # noqa: BLE001
-        task.status = "failed"
-        task.error = str(e)
-        task.duration_ms = int((time.monotonic() - started) * 1000)
+        TaskQueue.finalize(db, ListingTask, task_id, epoch, {
+            "status": "failed", "error": str(e),
+            "duration_ms": int((time.monotonic() - started) * 1000)})
         db.add(ApiCallLog(provider="openai-compatible", model=model_name, purpose="listing",
-                          status="failed", latency_ms=task.duration_ms, error=str(e)))
+                          status="failed", latency_ms=int((time.monotonic() - started) * 1000),
+                          error=str(e), price_version=PRICING_VERSION))
         db.commit()
+        db.refresh(task)
         return task
+    finally:
+        # 无论成功/失败都释放预算预留（未知费用未预留，无需释放）
+        TaskQueue.release_reservation(est)
 
     # 关闭旧版本，写新版本
     db.query(ListingVersion).filter(
@@ -256,12 +275,17 @@ def run_listing_task(db, task_id: int) -> ListingTask:
             continue
         db.add(ListingField(version_id=version.id, field=field_name, content=content))
 
-    task.status = "completed"
-    task.is_simulated = is_simulated
-    task.model_name = model_name or ("simulated" if is_simulated else "")
-    task.cost_usd = cost
-    task.duration_ms = int((time.monotonic() - started) * 1000)
-    db.commit()
+    # 条件写终态：epoch 已变（期间被重试）则本次结果作废
+    written = TaskQueue.finalize(db, ListingTask, task_id, epoch, {
+        "status": "completed", "is_simulated": is_simulated,
+        "model_name": model_name or ("simulated" if is_simulated else ""),
+        "cost_usd": cost,
+        "duration_ms": int((time.monotonic() - started) * 1000)})
+    if not written:
+        logger.info("Listing 任务 %s 执行期间被重试，本次结果已丢弃（epoch=%s）",
+                    task_id, epoch)
+        db.refresh(task)
+        return task
 
     # 生成后自动执行文案审核
     try:
@@ -326,16 +350,22 @@ def regenerate_field(db, version_id: int, field_name: str) -> dict:
     adapter = get_text_adapter()
     from .task_queue import TaskQueue
     est = _estimate_text_cost(adapter, facts, rules)
-    ok, msg = TaskQueue.check_budget(est, effective_settings().per_task_budget_usd)
+    ok, msg = TaskQueue.check_and_reserve(est, effective_settings().per_task_budget_usd)
     if not ok:
         raise ValueError(f"预算检查未通过：{msg}")
-    result = adapter.generate_listing(product=facts, platform=version.platform,
-                                      market=version.market, language=version.language,
-                                      rules=rules)
+    try:
+        result = adapter.generate_listing(product=facts, platform=version.platform,
+                                          market=version.market, language=version.language,
+                                          rules=rules)
+    finally:
+        TaskQueue.release_reservation(est)
     if field_name not in result.fields:
         raise ValueError(f"模型未返回字段 {field_name}")
+    from .ai.base import PRICING_VERSION
     db.add(ApiCallLog(provider=adapter.name, model=adapter.model, purpose="listing_regen",
                       status="success", cost_usd=result.cost_usd,
+                      cost_basis=("estimated" if result.cost_usd is not None else "unknown"),
+                      price_version=PRICING_VERSION,
                       tokens_in=result.tokens_in, tokens_out=result.tokens_out))
     db.commit()
     return {"field": field_name, "content": result.fields[field_name]}

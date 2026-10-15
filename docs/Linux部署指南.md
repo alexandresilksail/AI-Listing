@@ -162,8 +162,9 @@ alembic upgrade head     # 生产推荐使用迁移而非 create_all
 
 - [ ] `.env` 与 `data/runtime_settings.json` 权限 600，**不进版本库**（`.gitignore` 已排除）
 - [ ] `PL_API_TOKEN` 已设置长随机值（`openssl rand -hex 32`），生产 `PL_ENV=production`（无令牌服务拒绝启动）
+- [ ] **令牌未通过任何构建参数注入前端**（V1.2 红线：构建期内置密钥=公开泄露；前端仅运行时输入）
 - [ ] 防火墙只开放 80/443，禁止 8000 端口对外（`ufw allow 80,443/tcp`）
-- [ ] 定期备份 `data/` 或 PostgreSQL
+- [ ] 定期备份 `data/` 或 PostgreSQL（应用升级时亦会自动生成 `<db>.bak-<时间戳>`）
 - [ ] 生产 `PL_CORS_ORIGINS` 只填写自己的域名，不要用 `*`
 - [ ] 上传目录与 Nginx `client_max_body_size` 保持一致（示例为 30m）
 - [ ] 出站请求默认禁止访问内网/云元数据地址（SSRF 防护）；仅在可信内网环境需要回调时才考虑 `PL_ALLOW_INSECURE_DOWNLOAD=true`
@@ -179,16 +180,14 @@ sudo nginx -t && sudo systemctl reload nginx
 
 Docker 部署升级只需：`git pull && docker compose up -d --build`（前端随镜像重新构建）。
 
-### V1.0 → V1.1 升级特别说明
+### V1.0 → V1.2 升级特别说明
 
-V1.1 将费用字段 `cost_usd` 改为可空（支持「未知费用」三态），`init_db()` 不会修改已存在的表结构。从 V1.0 升级：
+V1.2 起启动时会**自动执行 Alembic 迁移**（`migrations/versions/`），迁移前自动备份：
 
 ```bash
-# 方式一（推荐用于开发库）：删除旧库重新初始化
-sudo systemctl stop polylisting
-rm /opt/polylisting/data/polylisting.db
-sudo systemctl start polylisting   # 启动时按新 schema 重建
-
-# 方式二（生产库）：编写 Alembic 迁移 ALTER COLUMN cost_usd DROP NOT NULL
+# 自动（默认）：服务启动即执行，备份位于 <db>.bak-<时间戳>
+# 手动：
 cd /opt/polylisting/backend && source .venv/bin/activate && alembic upgrade head
 ```
+
+安全约定：迁移失败会自动回滚（SQLite DDL 具事务性）并阻止服务启动，**绝不清空或重建数据库**；备份文件保留可人工恢复。迁移链：`0001_baseline`（全表基线）→ `0002_cost_usd_nullable`（费用三态）→ `0003_v12_epoch_cost_columns`（任务版本号与成本追溯列）。
